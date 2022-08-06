@@ -26,6 +26,14 @@ void loadWordList(std::string file, std::vector<std::string> &out, int size)
         std::string line;
         while (std::getline(stream, line))
         {
+            if (line.size() > 0 && line[line.size() - 1] == '\n')
+            {
+                line = line.substr(0, line.size() - 1);
+            }
+            if (line.size() > 0 && line[line.size() - 1] == '\r')
+            {
+                line = line.substr(0, line.size() - 1);
+            }
             if (line.size() == size)
             {
                 out.push_back(line);
@@ -425,10 +433,8 @@ public:
             Node *base = m_nodes[i];
             base->find_cliques(out.m_data);
             std::cout << "Iter " << i << "/" << nodeCount << ". Found " << out.size() << "\r" << std::flush;
-            // if(result.size() > 0)
-            // {
+            // if (out.size() > 0)
             //     break;
-            // }
         }
     }
 };
@@ -440,7 +446,8 @@ int main(int argc, char **argv)
     // Load all the words
     std::vector<std::string> allWords;
     loadWordList(INPUT_FILE, allWords, CLIQUE_DEPTH);
-    std::cout << "Loaded " << allWords.size() << " words from disk" << std::endl;
+    std::cout << "Loaded " << allWords.size() << " " << CLIQUE_DEPTH << " letter words from " << INPUT_FILE
+              << std::endl;
 
     // Find words with all unique characters
     std::vector<std::string> uniqueWords;
