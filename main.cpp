@@ -3,14 +3,24 @@
 #include <chrono>
 #include <fstream>
 #include <functional>
+#include <iomanip>
+#include <ios>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <ostream>
 #include <set>
 #include <sstream>
 #include <stdint.h>
+#include <string.h>
 #include <string>
 #include <vector>
+
+#include <cmath>
+#include <condition_variable>
+#include <mutex>
+#include <queue>
+#include <thread>
 
 // Words from here https://github.com/dwyl/english-words
 
@@ -202,8 +212,8 @@ public:
 
     void connect(Node &other)
     {
-        m_edges.push_back(&other);
-        other.m_edges.push_back(this);
+        m_edges.push_back(other.m_hash);
+        other.m_edges.push_back(m_hash);
     }
 
     /// Hard coded 5-len clique finder
@@ -218,35 +228,35 @@ public:
 
         for (i1 = 0u; i1 < count - 1; ++i1)
         {
-            const Node &first = *m_edges[i1];
+            const uint32_t firstHash = m_edges[i1];
             // Don't need to check first hash as all edges already guarantee no clash with this node
-            // if((first.m_hash & hash0) != 0) continue;
-            const uint32_t hash1 = first.m_hash | hash0;
+            // if((firstHash & hash0) != 0) continue;
+            const uint32_t hash1 = firstHash | hash0;
 
             for (i2 = i1 + 1; i2 < count; i2++)
             {
-                const Node &second = *m_edges[i2];
-                if ((second.m_hash & hash1) != 0)
+                const uint32_t secondHash = m_edges[i2];
+                if ((secondHash & hash1) != 0)
                     continue;
-                const uint32_t hash2 = second.m_hash | hash1;
+                const uint32_t hash2 = secondHash | hash1;
 
                 for (i3 = i2 + 1; i3 < count; i3++)
                 {
-                    const Node &third = *m_edges[i3];
-                    if ((third.m_hash & hash2) != 0)
+                    const uint32_t thirdHash = m_edges[i3];
+                    if ((thirdHash & hash2) != 0)
                         continue;
-                    const uint32_t hash3 = third.m_hash | hash2;
+                    const uint32_t hash3 = thirdHash | hash2;
 
                     for (i4 = i3 + 1; i4 < count; i4++)
                     {
-                        const Node &fourth = *m_edges[i4];
-                        if ((fourth.m_hash & hash3) != 0)
+                        const uint32_t fourthHash = m_edges[i4];
+                        if ((fourthHash & hash3) != 0)
                             continue;
                         WordList output;
-                        output[0] = fourth.m_hash;
-                        output[1] = third.m_hash;
-                        output[2] = second.m_hash;
-                        output[3] = first.m_hash;
+                        output[0] = fourthHash;
+                        output[1] = thirdHash;
+                        output[2] = secondHash;
+                        output[3] = firstHash;
                         output[4] = m_hash;
                         out.push_back(output);
                     }
@@ -280,14 +290,14 @@ private:
     inline void find_next(std::vector<WordList> &out, WordList &current, uint32_t i0, uint32_t count, uint32_t hash,
                           uint32_t index) const
     {
-        for (uint32_t i = i0; i < count; ++i)
+        for (uint32_t i = i0; i < count - index; ++i)
         {
-            const Node &node = *m_edges[i];
+            const uint32_t nodeHash = m_edges[i];
             // Node has overlap
-            if ((node.m_hash & hash) != 0)
+            if ((nodeHash & hash) != 0)
                 continue;
             // Store the new node
-            current[index] = node.m_hash;
+            current[index] = nodeHash;
             // If we're the last word to be added
             if (index == 0)
             {
@@ -297,13 +307,13 @@ private:
             else
             {
                 // recurse to find the next node
-                find_next(out, current, i + 1, count, node.m_hash | hash, index - 1);
+                find_next(out, current, i + 1, count, nodeHash | hash, index - 1);
             }
         }
     }
 
     const uint32_t m_hash;
-    std::vector<Node *> m_edges{};
+    std::vector<uint32_t> m_edges{};
     std::vector<std::string> m_words{};
 };
 
@@ -427,21 +437,133 @@ public:
 
     void findAllCliques(WordSets &out)
     {
+        std::cout << "Processing, this will take 1-2 minutes";
         auto nodeCount = size();
+        uint32_t every = nodeCount % 200;
         for (uint32_t i = 0; i < nodeCount; ++i)
         {
             Node *base = m_nodes[i];
             base->find_cliques(out.m_data);
-            std::cout << "Iter " << i << "/" << nodeCount << ". Found " << out.size() << "\r" << std::flush;
+            // std::cout << "Iter " << i << "/" << nodeCount << ". Found " << out.size() << "\r" << std::flush;
+
             // if (out.size() > 0)
             //     break;
         }
+        std::cout << "\n";
+    }
+
+    void findAllCliquesMultiThread(WordSets &finalOut, uint32_t numThreads)
+    {
+        if (m_nodes.size() < numThreads)
+        {
+            numThreads = static_cast<uint32_t>(m_nodes.size());
+        }
+        if (numThreads == 1)
+        {
+            return findAllCliques(finalOut);
+        }
+        else if (numThreads == 0)
+        {
+            return;
+        }
+
+        std::vector<std::unique_ptr<std::thread>> workers{};
+
+        workers.resize(numThreads);
+
+        std::mutex finalOutMtx{};
+
+        std::queue<Node *> processQueue{};
+        std::mutex processQueueMtx{};
+
+        uint32_t processed{0u};
+        std::mutex processedMutex{};
+
+        std::condition_variable onConsumed{};
+
+        for (Node *node : m_nodes)
+        {
+            // fill the queue
+            processQueue.push(node);
+        }
+
+        const auto nodeCount = processQueue.size();
+
+        auto workerThread = [&]()
+        {
+            std::vector<WordList> result;
+            while (true)
+            {
+                Node *proc = nullptr;
+                {
+                    std::lock_guard<std::mutex> myLock(processQueueMtx);
+                    if (processQueue.empty())
+                    {
+                        // no more to process
+                        break;
+                    }
+                    proc = processQueue.front();
+                    processQueue.pop();
+                }
+                proc->find_cliques(result);
+                {
+                    std::lock_guard<std::mutex> myLock(processedMutex);
+                    processed++;
+                    onConsumed.notify_one();
+                }
+            }
+            {
+                // append result
+                std::lock_guard<std::mutex> myLock(finalOutMtx);
+                for (const WordList &item : result)
+                {
+                    finalOut.m_data.push_back(item);
+                }
+            }
+        };
+
+        for (uint32_t i = 0; i < numThreads; ++i)
+        {
+            workers[i].reset(new std::thread(workerThread));
+        }
+
+        while (processed < nodeCount)
+        {
+            int i;
+            {
+                std::unique_lock<std::mutex> myLock(processedMutex);
+                onConsumed.wait(myLock);
+                i = processed;
+            }
+            std::cout << "Iter " << i << "/" << nodeCount << "\r" << std::flush;
+        }
+
+        for (uint32_t i = 0; i < numThreads; ++i)
+        {
+            workers[i]->join();
+        }
+        workers.clear();
+        std::cout << "\nFound " << finalOut.size() << std::endl;
     }
 };
 
 int main(int argc, char **argv)
 {
+    int threads = 1;
+
+    for(int iArg = 1; iArg < argc; iArg++)
+    {
+        char* arg = argv[iArg];
+        if(strlen(arg) >= 3 && arg[0] == '-' && arg[1] == 't')
+        {
+            arg += 2;
+            threads = std::stoi(std::string(arg));
+            std::cout << "Using " << threads << " threads\n";
+        }
+    }
+
     Timer timer{};
+    timer.tick();
 
     // Load all the words
     std::vector<std::string> allWords;
@@ -467,10 +589,7 @@ int main(int argc, char **argv)
     // Find cliques
     WordSets wordSet;
     wordSet.m_data.reserve(nodeCount);
-    timer.tick();
-    allNodes.findAllCliques(wordSet);
-    auto algoTook = timer.tock();
-    std::cout << "\nTook " << algoTook << "ms\n";
+    allNodes.findAllCliquesMultiThread(wordSet, threads);
 
     // Remove duplicates
     WordSets unique;
@@ -507,6 +626,9 @@ int main(int argc, char **argv)
     }
     std::cout << "Found " << lines.size() << " combinations\n";
 
+    // Alphabetical order output
+    std::sort(lines.begin(), lines.end());
+
     // Save to csv
     std::fstream fs(OUTPUT_FILE, std::ios::out);
     if (fs.is_open())
@@ -522,6 +644,10 @@ int main(int argc, char **argv)
     {
         std::cout << "Failed to open output file " << OUTPUT_FILE << " for writing :(\n";
     }
+
+    auto algoTook = timer.tock();
+
+    std::cout << "Total time: " << std::setprecision(5) << (algoTook / 1000.0) << " seconds" << std::endl;
 
     return 0;
 }
