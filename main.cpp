@@ -67,7 +67,7 @@ uint32_t wordHash(const std::string &word)
     return hash;
 }
 
-bool isWordCharsUnique(const std::string &word)
+bool areWordCharsAllUnique(const std::string &word)
 {
     uint32_t lookup = 0u;
     for (char c : word)
@@ -152,43 +152,35 @@ struct FixedVector
     {
         return &(data[_capacity]);
     }
-    bool operator==(const FixedVector &other) const
-    {
-        for (uint32_t i = 0u; i < _capacity; ++i)
-        {
-            if (data[i] != other[i])
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-    bool operator!=(const FixedVector &other) const
-    {
-        return !((*this) == other);
-    }
     Type data[_capacity];
-};
-
-template <typename Type, uint32_t _capacity>
-struct std::hash<FixedVector<Type, _capacity>>
-{
-    using _dtype = FixedVector<Type, _capacity>;
-    std::size_t operator()(_dtype const &items) const noexcept
-    {
-        std::size_t seed{0u};
-        std::hash<Type> hasher;
-        for (const Type &item : items)
-        {
-            // Hash the number itself and then xor the seeds, as we don't care about word order
-            seed ^= hasher(item);
-        }
-        return seed;
-    }
 };
 
 using WordList = FixedVector<uint32_t, CLIQUE_DEPTH>;
 using StringList = FixedVector<std::string, CLIQUE_DEPTH>;
+
+uint32_t myIntHsh(uint32_t x) {
+    // use our own hash, as the implementation differs between windows and linux
+    x = ((x >> 16) ^ x) * 0x45d9f3b;
+    x = ((x >> 16) ^ x) * 0x45d9f3b;
+    x = (x >> 16) ^ x;
+    return x;
+}
+
+template <uint32_t _capacity>
+struct std::hash<FixedVector<uint32_t, _capacity>>
+{
+    using _dtype = FixedVector<uint32_t, _capacity>;
+    std::size_t operator()(_dtype const &items) const noexcept
+    {
+        std::size_t seed{0u};
+        for (const uint32_t &item : items)
+        {
+            // Hash the number itself and then xor the seeds, as we don't care about word order
+            seed ^= myIntHsh(item);
+        }
+        return seed;
+    }
+};
 
 /// Represents a unique set of letters
 /// Contains a list of all words which contain this unique set
@@ -336,14 +328,14 @@ void findUniqueWords(const std::vector<std::string> &allWords, std::vector<std::
 {
     for (const auto word : allWords)
     {
-        if (isWordCharsUnique(word))
+        if (areWordCharsAllUnique(word))
         {
             out.push_back(word);
         }
     }
 }
 
-class WordSets
+class WordListSet
 {
 public:
     std::vector<WordList> m_data;
@@ -352,7 +344,7 @@ public:
         return m_data.size();
     }
 
-    void getUnique(WordSets &out)
+    void getUnique(WordListSet &out)
     {
         std::set<std::size_t> uniqueHashTable;
 
@@ -435,36 +427,29 @@ public:
         return *(m_lookup[hash]);
     }
 
-    void findAllCliques(WordSets &out)
+    void findAllCliques(WordListSet &out)
     {
-        std::cout << "Processing, this will take 1-2 minutes";
+        std::cout << "Processing, this will take 1-2 minutes\n";
         auto nodeCount = size();
-        uint32_t every = nodeCount % 200;
         for (uint32_t i = 0; i < nodeCount; ++i)
         {
             Node *base = m_nodes[i];
             base->find_cliques(out.m_data);
-            // std::cout << "Iter " << i << "/" << nodeCount << ". Found " << out.size() << "\r" << std::flush;
-
-            // if (out.size() > 0)
-            //     break;
+            std::cout << "Iter " << i << "/" << nodeCount << ". Found " << out.size() << "\r" << std::flush;
         }
         std::cout << "\n";
     }
 
-    void findAllCliquesMultiThread(WordSets &finalOut, uint32_t numThreads)
+    void findAllCliquesMultiThread(WordListSet &finalOut, uint32_t numThreads)
     {
         if (m_nodes.size() < numThreads)
         {
+            // no point having more threads than nodes
             numThreads = static_cast<uint32_t>(m_nodes.size());
         }
-        if (numThreads == 1)
+        if (numThreads <= 1)
         {
             return findAllCliques(finalOut);
-        }
-        else if (numThreads == 0)
-        {
-            return;
         }
 
         std::vector<std::unique_ptr<std::thread>> workers{};
@@ -527,6 +512,7 @@ public:
             workers[i].reset(new std::thread(workerThread));
         }
 
+        // Log the progress while we wait
         while (processed < nodeCount)
         {
             int i;
@@ -537,7 +523,7 @@ public:
             }
             std::cout << "Iter " << i << "/" << nodeCount << "\r" << std::flush;
         }
-
+        // All the workers should halt once the queue is empty
         for (uint32_t i = 0; i < numThreads; ++i)
         {
             workers[i]->join();
@@ -551,10 +537,10 @@ int main(int argc, char **argv)
 {
     int threads = 1;
 
-    for(int iArg = 1; iArg < argc; iArg++)
+    for (int iArg = 1; iArg < argc; iArg++)
     {
-        char* arg = argv[iArg];
-        if(strlen(arg) >= 3 && arg[0] == '-' && arg[1] == 't')
+        char *arg = argv[iArg];
+        if (strlen(arg) >= 3 && arg[0] == '-' && arg[1] == 't')
         {
             arg += 2;
             threads = std::stoi(std::string(arg));
@@ -587,14 +573,14 @@ int main(int argc, char **argv)
     std::cout << "Generated " << connections << " node edges" << std::endl;
 
     // Find cliques
-    WordSets wordSet;
-    wordSet.m_data.reserve(nodeCount);
-    allNodes.findAllCliquesMultiThread(wordSet, threads);
+    WordListSet allFoundWordLists;
+    allFoundWordLists.m_data.reserve(nodeCount);
+    allNodes.findAllCliquesMultiThread(allFoundWordLists, threads);
 
     // Remove duplicates
-    WordSets unique;
-    wordSet.getUnique(unique);
-    std::cout << "Found " << unique.size() << " unique results\n";
+    WordListSet uniqueWordLists;
+    allFoundWordLists.getUnique(uniqueWordLists);
+    std::cout << "Found " << uniqueWordLists.size() << " unique results\n";
 
     // Expand each set of nodes and create multiple entries combinatorially
     std::vector<std::string> lines;
@@ -618,8 +604,8 @@ int main(int argc, char **argv)
         }
     };
 
-    std::cout << "Expanding " << unique.size() << " results to find all combinations\n";
-    for (const WordList item : unique.m_data)
+    std::cout << "Expanding " << uniqueWordLists.size() << " results to find all combinations\n";
+    for (const WordList item : uniqueWordLists.m_data)
     {
         StringList stringsTemp;
         expand(item, 0, stringsTemp);
